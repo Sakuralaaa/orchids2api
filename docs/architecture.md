@@ -9,8 +9,9 @@ Orchids-2api/
 │       └── main.go              # 应用入口点
 ├── internal/                     # 核心业务逻辑
 │   ├── api/api.go               # 账号管理 REST API
-│   ├── handler/handler.go       # 主请求处理器 (/v1/messages)
-│   ├── loadbalancer/loadbalancer.go  # 加权负载均衡
+│   ├── handler/handler.go       # 主请求处理器 (/v1/messages, /v1/models)
+│   ├── loadbalancer/loadbalancer.go  # 多策略负载均衡
+│   ├── models/models.go         # 模型注册表与映射
 │   ├── store/store.go           # SQLite 数据库层
 │   ├── config/config.go         # 配置管理
 │   ├── client/client.go         # 上游 API 客户端
@@ -28,25 +29,60 @@ Orchids-2api/
 
 ## 核心组件
 
+### 模型注册表 (ModelRegistry)
+
+**位置**: `internal/models/models.go`
+
+- 管理支持的 AI 模型列表
+- 支持模型别名映射
+- 模型可用性检查
+- 按需模型加载支持
+
+**支持的模型**:
+- Gemini 3 Flash (Google)
+- Claude Opus 4.5 (Anthropic)
+- Claude Sonnet 4.5 (Anthropic)
+- GPT-5.2 Codex (OpenAI)
+
 ### 负载均衡器 (LoadBalancer)
 
 **位置**: `internal/loadbalancer/loadbalancer.go`
 
-- 加权随机选择算法
+**负载均衡策略**:
+- `weighted_random` - 加权随机选择 (默认)
+- `round_robin` - 轮询分发
+- `least_connections` - 最少连接数优先
+
+**健康检查机制**:
+- 自动追踪账号成功/失败请求
+- 连续失败自动标记为不健康
+- 冷却期后自动恢复
+- 不健康账号自动排除
+
+**速率限制**:
+- 每分钟请求限制
+- 每小时请求限制
+- 突发请求限制
+- 自动重置计数器
+
+**主要功能**:
 - 支持账号排除 (故障转移)
 - 自动递增请求计数
 - 仅选择已启用的账号
+- 实时健康状态报告
 
 ### 请求处理器 (Handler)
 
 **位置**: `internal/handler/handler.go`
 
 - 解析 Claude API 格式请求
+- 调用模型注册表解析模型
 - 调用负载均衡器选择账号
 - 构建上游请求提示词
 - 处理 SSE 流式响应
 - 转换响应格式为 Claude API 格式
 - 处理工具调用 (Tool Calls)
+- 报告请求成功/失败给负载均衡器
 
 ### 上游客户端 (Client)
 
@@ -87,7 +123,13 @@ POST /v1/messages (Handler)
     ↓
 解析请求 → 提取 model, messages, tools
     ↓
-负载均衡器 → 选择账号 (加权随机)
+模型注册表 → 解析模型别名，获取实际模型
+    ↓
+负载均衡器 → 选择账号 (加权随机/轮询/最少连接)
+    ↓ 
+健康检查 → 过滤不健康账号
+    ↓
+速率限制 → 过滤超限账号
     ↓
 提示词构建器 → 转换为 Markdown 格式
     ↓
@@ -98,6 +140,8 @@ Clerk 服务 → 获取 JWT Token
 接收 SSE 流式响应
     ↓
 转换为 Claude API SSE 格式
+    ↓
+报告结果 → 更新账号健康状态
     ↓
 流式返回给客户端
     ↓
@@ -135,5 +179,20 @@ type Settings struct {
     ID    int64  // 主键
     Key   string // 设置键 (唯一)
     Value string // 设置值
+}
+```
+
+### AccountHealth 账号健康状态
+
+```go
+type AccountHealth struct {
+    ID              int64     // 账号 ID
+    FailureCount    int       // 总失败次数
+    LastFailure     time.Time // 最后失败时间
+    LastSuccess     time.Time // 最后成功时间
+    IsHealthy       bool      // 是否健康
+    ConsecutiveFails int      // 连续失败次数
+    TotalRequests   int64     // 总请求数
+    TotalFailures   int64     // 总失败数
 }
 ```
