@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -68,7 +69,43 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// API v1 endpoints
 	mux.HandleFunc("/v1/messages", h.HandleMessages)
+	mux.HandleFunc("/v1/models", h.HandleModels)
+	mux.HandleFunc("/v1/models/", h.HandleModelInfo)
+
+	// Load balancer status endpoint
+	mux.HandleFunc("/api/loadbalancer/stats", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		stats := lb.GetStats()
+		json.NewEncoder(w).Encode(stats)
+	}))
+
+	mux.HandleFunc("/api/loadbalancer/health", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		health := lb.GetAllAccountHealth()
+		json.NewEncoder(w).Encode(health)
+	}))
+
+	mux.HandleFunc("/api/loadbalancer/strategy", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]string{"strategy": string(lb.GetStrategy())})
+		case http.MethodPut, http.MethodPost:
+			var req struct {
+				Strategy string `json:"strategy"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request", http.StatusBadRequest)
+				return
+			}
+			lb.SetStrategy(loadbalancer.Strategy(req.Strategy))
+			json.NewEncoder(w).Encode(map[string]string{"strategy": req.Strategy})
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
 
 	mux.HandleFunc("/api/accounts", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleAccounts))
 	mux.HandleFunc("/api/accounts/", middleware.BasicAuth(cfg.AdminUser, cfg.AdminPass, apiHandler.HandleAccountByID))

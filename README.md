@@ -10,7 +10,16 @@
 - 兼容 Claude API 格式的请求转发
 - 将请求代理到 Orchids 后端服务
 - 提供 Web 管理界面
+- 支持多种 AI 模型
 
+### 支持的模型
+
+| 模型 | 提供商 | 描述 |
+|------|--------|------|
+| Gemini 3 Flash | Google | 快速高效的 Gemini 模型 |
+| Claude Opus 4.5 | Anthropic | Anthropic 最强大的 Claude 模型 |
+| Claude Sonnet 4.5 | Anthropic | 均衡的 Claude 模型 |
+| GPT-5.2 Codex | OpenAI | OpenAI 高级代码生成模型 |
 
 ## 文档目录
 
@@ -36,12 +45,32 @@ docker compose up -d
 ## 主要特性
 
 1. **多账号管理** - 支持添加、编辑、删除多个 Orchids 账号
-2. **负载均衡** - 加权随机算法分配请求
+2. **多策略负载均衡** - 支持加权随机、轮询、最少连接三种策略
 3. **故障转移** - 账号失败时自动切换
-4. **模型映射** - 透明映射 Claude 模型到上游模型
-5. **工具调用** - 完整支持 Claude Tool Use
-6. **流式响应** - SSE 实时响应
-7. **Token 计数** - 估算输入/输出 Token
-8. **调试日志** - 详细的请求/响应日志
-9. **管理界面** - Web UI 管理账号
-10. **导入导出** - 账号配置备份恢复
+4. **健康检查** - 自动追踪账号健康状态，排除不健康账号
+5. **速率限制** - 每账号请求速率限制保护
+6. **多模型支持** - 支持 Gemini 3 Flash、Claude Opus 4.5、Claude Sonnet 4.5、GPT-5.2 Codex
+7. **模型别名** - 透明映射常用模型名称到实际模型
+8. **模型列表 API** - OpenAI 兼容的 /v1/models 端点
+9. **工具调用** - 完整支持 Claude Tool Use
+10. **流式响应** - SSE 实时响应
+11. **Token 计数** - 估算输入/输出 Token
+12. **调试日志** - 详细的请求/响应日志
+13. **管理界面** - Web UI 管理账号
+14. **导入导出** - 账号配置备份恢复
+
+## API 端点
+
+### 主要端点
+
+- `GET /v1/models` - 获取可用模型列表
+- `POST /v1/messages` - Claude API 代理端点
+- `GET /health` - 健康检查
+
+### 负载均衡管理
+
+- `GET /api/loadbalancer/stats` - 获取负载均衡器统计
+- `GET /api/loadbalancer/health` - 获取账号健康状态
+- `PUT /api/loadbalancer/strategy` - 设置负载均衡策略
+
+详细 API 文档请参阅 [API 接口](./docs/api-reference.md)。

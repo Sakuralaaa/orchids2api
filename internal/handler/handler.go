@@ -15,15 +15,17 @@ import (
 	"orchids-api/internal/config"
 	"orchids-api/internal/debug"
 	"orchids-api/internal/loadbalancer"
+	"orchids-api/internal/models"
 	"orchids-api/internal/prompt"
 	"orchids-api/internal/store"
 	"orchids-api/internal/tiktoken"
 )
 
 type Handler struct {
-	config       *config.Config
-	client       *client.Client
-	loadBalancer *loadbalancer.LoadBalancer
+	config        *config.Config
+	client        *client.Client
+	loadBalancer  *loadbalancer.LoadBalancer
+	modelRegistry *models.ModelRegistry
 }
 
 type ClaudeRequest struct {
@@ -36,28 +38,124 @@ type ClaudeRequest struct {
 
 func New(cfg *config.Config) *Handler {
 	return &Handler{
-		config: cfg,
-		client: client.New(cfg),
+		config:        cfg,
+		client:        client.New(cfg),
+		modelRegistry: models.NewRegistry(),
 	}
 }
 
 func NewWithLoadBalancer(cfg *config.Config, lb *loadbalancer.LoadBalancer) *Handler {
 	return &Handler{
-		config:       cfg,
-		loadBalancer: lb,
+		config:        cfg,
+		loadBalancer:  lb,
+		modelRegistry: models.NewRegistry(),
 	}
 }
 
 // mapModel 根据请求的 model 名称映射到实际使用的模型
-func mapModel(requestModel string) string {
-	lowerModel := strings.ToLower(requestModel)
-	if strings.Contains(lowerModel, "opus") {
-		return "claude-opus-4.5"
+func (h *Handler) mapModel(requestModel string) string {
+	return h.modelRegistry.ResolveModel(requestModel)
+}
+
+// HandleModels handles the /v1/models endpoint
+func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	if strings.Contains(lowerModel, "haiku") {
-		return "gemini-3-flash"
+
+	availableModels := h.modelRegistry.ListAvailableModels()
+
+	// Format response in OpenAI-compatible format
+	response := map[string]interface{}{
+		"object": "list",
+		"data":   make([]map[string]interface{}, 0, len(availableModels)),
 	}
-	return "claude-sonnet-4-5"
+
+	for _, m := range availableModels {
+		modelData := map[string]interface{}{
+			"id":       m.ID,
+			"object":   "model",
+			"created":  time.Now().Unix(),
+			"owned_by": m.Provider,
+			"permission": []map[string]interface{}{
+				{
+					"id":                   "modelperm-" + m.ID,
+					"object":               "model_permission",
+					"created":              time.Now().Unix(),
+					"allow_create_engine":  false,
+					"allow_sampling":       true,
+					"allow_logprobs":       true,
+					"allow_search_indices": false,
+					"allow_view":           true,
+					"allow_fine_tuning":    false,
+					"organization":         "*",
+					"is_blocking":          false,
+				},
+			},
+			"root":   m.ID,
+			"parent": nil,
+		}
+		response["data"] = append(response["data"].([]map[string]interface{}), modelData)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// HandleModelInfo handles the /v1/models/{model_id} endpoint
+func (h *Handler) HandleModelInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract model ID from path
+	path := r.URL.Path
+	modelID := strings.TrimPrefix(path, "/v1/models/")
+	
+	if modelID == "" {
+		h.HandleModels(w, r)
+		return
+	}
+
+	model, found := h.modelRegistry.GetModel(modelID)
+	if !found {
+		http.Error(w, "Model not found", http.StatusNotFound)
+		return
+	}
+
+	response := map[string]interface{}{
+		"id":       model.ID,
+		"object":   "model",
+		"created":  time.Now().Unix(),
+		"owned_by": model.Provider,
+		"permission": []map[string]interface{}{
+			{
+				"id":                   "modelperm-" + model.ID,
+				"object":               "model_permission",
+				"created":              time.Now().Unix(),
+				"allow_create_engine":  false,
+				"allow_sampling":       true,
+				"allow_logprobs":       true,
+				"allow_search_indices": false,
+				"allow_view":           true,
+				"allow_fine_tuning":    false,
+				"organization":         "*",
+				"is_blocking":          false,
+			},
+		},
+		"root":   model.ID,
+		"parent": nil,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// GetModelRegistry returns the model registry
+func (h *Handler) GetModelRegistry() *models.ModelRegistry {
+	return h.modelRegistry
 }
 
 // fixToolInput 修复工具输入中的类型问题
@@ -188,7 +286,7 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	logger.LogConvertedPrompt(builtPrompt)
 
 	// 映射模型
-	mappedModel := mapModel(req.Model)
+	mappedModel := h.mapModel(req.Model)
 	log.Printf("模型映射: %s -> %s", req.Model, mappedModel)
 
 	// 设置 SSE 响应头
@@ -449,6 +547,10 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 							stopReason = "end_turn"
 						}
 					}
+					// Report success to load balancer
+					if currentAccount != nil && h.loadBalancer != nil {
+						h.loadBalancer.ReportSuccess(currentAccount.ID)
+					}
 					finishResponse(stopReason)
 				}
 			}, logger)
@@ -456,6 +558,8 @@ func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("Error: %v", err)
 				if currentAccount != nil && h.loadBalancer != nil {
+					// Report failure to load balancer
+					h.loadBalancer.ReportFailure(currentAccount.ID)
 					failedAccountIDs = append(failedAccountIDs, currentAccount.ID)
 					log.Printf("账号 %s 请求失败，尝试切换账号 (已排除 %d 个)", currentAccount.Name, len(failedAccountIDs))
 					if retryErr := selectAccount(); retryErr == nil {
