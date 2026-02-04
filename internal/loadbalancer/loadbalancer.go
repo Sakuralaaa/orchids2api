@@ -161,10 +161,6 @@ func (lb *LoadBalancer) GetNextAccountExcluding(excludeIDs []int64) (*store.Acco
 
 // filterHealthyAccounts returns only accounts that are considered healthy
 func (lb *LoadBalancer) filterHealthyAccounts(accounts []*store.Account) []*store.Account {
-	if !lb.healthCheckEnabled {
-		return accounts
-	}
-
 	now := time.Now()
 	var healthy []*store.Account
 
